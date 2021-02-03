@@ -606,7 +606,7 @@ namespace CombatExtended
                 }
                 if (spawnedPawnInFaction.HostFaction == null && spawnedPawnInFaction.RaceProps.Humanlike && spawnedPawnInFaction.Faction != Faction.OfPlayer && !spawnedPawnInFaction.Downed)
                 {
-                    pawns.Add(spawnedPawnsInFaction[index]);
+                    pawns.Add(spawnedPawnInFaction);
                 }
             }
             if (pawns == null)
