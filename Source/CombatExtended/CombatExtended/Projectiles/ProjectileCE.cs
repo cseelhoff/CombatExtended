@@ -505,55 +505,111 @@ namespace CombatExtended
         }
 
         //Removed minimum collision distance
-        private bool CheckForCollisionBetween()
+        private bool CheckCellForCollision(IntVec3 cell)
         {
-            var lastPosIV3 = LastPos.ToIntVec3();
-            var newPosIV3 = ExactPosition.ToIntVec3();
-
-            List<Thing> list = base.Map.listerThings.ThingsInGroup(ThingRequestGroup.ProjectileInterceptor);
-            for (int i = 0; i < list.Count; i++)
+            if (BlockerRegistry.CheckCellForCollisionCallback(this, cell, launcher))
             {
-                if (CheckIntercept(list[i], list[i].TryGetComp<CompProjectileInterceptor>()))
+                this.ticksToImpact = 0;
+                this.landed = true;
+
+                this.Impact(null);
+                return true;
+            }
+            var roofChecked = false;
+            var justWallsRoofs = false;
+
+            //Check for minimum PAWN collision distance
+            float distFromOrigin = cell.DistanceToSquared(OriginIV3);
+            bool skipCollision = !def.projectile.alwaysFreeIntercept
+                && (minCollisionSqr <= 1f
+                    ? distFromOrigin < 1f
+                    : distFromOrigin <= Mathf.Min(144f, minCollisionSqr / 4));
+
+            //var mainThingList = new List<Thing>(Map.thingGrid.ThingsListAtFast(cell))
+            //.Where(t => justWallsRoofs ? t.def.Fillage == FillCategory.Full : (t is Pawn || t.def.Fillage != FillCategory.None)).ToList();
+
+            //Replaced LINQ with for loop with try catch for better compatibility with RimThreaded
+		    List<Thing> thingsListAtFast = base.Map.thingGrid.ThingsListAtFast(cell);
+            List<Thing> mainThingList = new List<Thing>();
+            for (int i = 0; i < thingsListAtFast.Count; i++) {
+			    Thing thing;
+			    try {
+				    thing = thingsListAtFast[i];
+			    } catch (ArgumentOutOfRangeException) {
+				    break;
+			    }
+			    if(justWallsRoofs) {
+				    if(thing != null && thing.def != null && thing.def.Fillage == FillCategory.Full) {
+                        mainThingList.Add(thing);
+				    }
+			    }					
+			    else {
+				    if(thing != null && (thing is Pawn || thing.def.Fillage != FillCategory.None)) {
+                        mainThingList.Add(thing);
+				    }
+			    }
+		    }
+
+            //Find pawns in adjacent cells and append them to main list
+            if (!justWallsRoofs)
+            {
+                var adjList = new List<IntVec3>();
+                adjList.AddRange(GenAdj.CellsAdjacentCardinal(cell, Rot4.FromAngleFlat(shotRotation), new IntVec2(collisionCheckSize, 0)).ToList());
+
+                //Iterate through adjacent cells and find all the pawns
+                foreach (var curCell in adjList)
                 {
-                    this.Destroy(DestroyMode.Vanish);
-                    return true;
+                    if (curCell != cell && curCell.InBounds(Map))
+                    {
+                        mainThingList.AddRange(Map.thingGrid.ThingsListAtFast(curCell)
+                        .Where(x => x is Pawn));
+
+                        if (Controller.settings.DebugDrawInterceptChecks)
+                        {
+                            Map.debugDrawer.FlashCell(curCell, 0.7f);
+                        }
+                    }
                 }
             }
 
-            #region Sanity checks
-            if (ticksToImpact == 0 || def.projectile.flyOverhead)
-                return false;
-
-            if (!lastPosIV3.InBounds(Map) || !newPosIV3.InBounds(Map))
+            //If the last position is above the wallCollisionHeight, we should check for roof intersections first
+            if (LastPos.y > CollisionVertical.WallCollisionHeight)
             {
-                return false;
-            }
-
-            if (Controller.settings.DebugDrawInterceptChecks)
-            {
-                Map.debugDrawer.FlashLine(lastPosIV3, newPosIV3);
-            }
-            #endregion
-
-            // Iterate through all cells between the last and the new position
-            // INCLUDING[!!!] THE LAST AND NEW POSITIONS!
-            var cells = GenSight.PointsOnLineOfSight(lastPosIV3, newPosIV3).Union(new[] { lastPosIV3, newPosIV3 }).Distinct().OrderBy(x => (x.ToVector3Shifted() - LastPos).MagnitudeHorizontalSquared());
-
-            //Order cells by distance from the last position
-            foreach (var cell in cells)
-            {
-                if (CheckCellForCollision(cell))
+                if (TryCollideWithRoof(cell))
                 {
                     return true;
                 }
-
-                if (Controller.settings.DebugDrawInterceptChecks)
-                    Map.debugDrawer.FlashCell(cell, 1, "o");
+                roofChecked = true;
             }
 
+            foreach (var thing in mainThingList.Distinct().OrderBy(x => (x.DrawPos - LastPos).sqrMagnitude))
+            {
+                if ((thing == launcher || thing == mount) && !canTargetSelf) continue;
+
+                // Check for collision
+                if ((!skipCollision || thing == intendedTarget) && TryCollideWith(thing))
+                    return true;
+
+                // Apply suppression. The height here is NOT that of the bullet in CELL,
+                // it is the height at the END OF THE PATH. This is because SuppressionRadius
+                // is not considered an EXACT limit.
+                if (!justWallsRoofs && ExactPosition.y < SuppressionRadius)
+                {
+                    var pawn = thing as Pawn;
+                    if (pawn != null)
+                    {
+                        ApplySuppression(pawn);
+                    }
+                }
+            }
+
+            //Finally check for intersecting with a roof (again).
+            if (!roofChecked && TryCollideWithRoof(cell))
+            {
+                return true;
+            }
             return false;
         }
-
         /// <summary>
         /// Checks whether a collision occurs along flight path within this cell.
         /// </summary>
